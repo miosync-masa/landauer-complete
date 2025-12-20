@@ -1,15 +1,15 @@
 """
 Landauer Extension Simulator
 ============================
-CRUD操作の熱力学的コストをシミュレーション
+Thermodynamic cost simulation for CRUD operations
 
-理論予測：
-  - Create: ~ k_B T ln(2)
-  - Delete: ~ k_B T ln(2) (Landauer)
+Theoretical Predictions:
+  - Create: ~ k_B T ln(2) (exothermic, W < 0)
+  - Delete: ~ k_B T ln(2) (Landauer bound)
   - Update: ~ 2 * k_B T ln(2)
-  - Maintain: エラー率に依存
+  - Maintain: Depends on error rate
 
-Author: Masamichi Iizumi & Tamaki
+Author: Masamichi Iizumi & Tamaki Iizumi
 Date: December 14, 2025
 """
 
@@ -17,109 +17,112 @@ import jax
 import jax.numpy as jnp
 from jax import random, jit, vmap
 import matplotlib.pyplot as plt
+import csv
+from datetime import datetime
 
 print("JAX devices:", jax.devices())
 
-# ===== 物理定数 =====
-KB = 1.0      # ボルツマン定数（単位系）
-GAMMA = 1.0   # 摩擦係数
-DT = 0.001    # 時間刻み
+# ===== Physical Constants =====
+KB = 1.0      # Boltzmann constant (in natural units)
+GAMMA = 1.0   # Friction coefficient
+DT = 0.001    # Time step
 
-# ===== ポテンシャル =====
+# ===== Potential Functions =====
 # V(x) = x^4 - b*x^2 - c*x
-# b: 障壁の高さ（正で二重井戸）
-# c: 傾き（操作バイアス）
+# b: Barrier height (positive for double-well)
+# c: Tilt (operation bias)
 
 @jit
 def potential(x, b, c):
+    """Double-well potential"""
     return x**4 - b * x**2 - c * x
 
 @jit
 def force(x, b, c):
-    """力 = -dV/dx（解析的）"""
+    """Force = -dV/dx (analytical)"""
     return -4*x**3 + 2*b*x + c
 
-# ===== 1ステップの時間発展 =====
+# ===== Single Step Time Evolution =====
 @jit
 def step_single(x, key, b, c, T):
-    """ランジュバン方程式の1ステップ（Euler-Maruyama）"""
+    """Single step of Langevin equation (Euler-Maruyama method)"""
     f = force(x, b, c)
     noise = random.normal(key)
     x_new = x + (f / GAMMA) * DT + jnp.sqrt(2 * KB * T * DT / GAMMA) * noise
     return x_new
 
-# バッチ版
+# Batch version
 @jit
 def step_batch(x_batch, keys, b, c, T):
-    """複数粒子を並列更新"""
+    """Parallel update of multiple particles"""
     return vmap(lambda x, k: step_single(x, k, b, c, T))(x_batch, keys)
 
-# ===== 仕事の計算 =====
+# ===== Work Calculation =====
 @jit
 def work_step(x, b_old, c_old, b_new, c_new):
-    """パラメータ変化による仕事 W = V_new - V_old"""
+    """Work from parameter change: W = V_new - V_old"""
     return potential(x, b_new, c_new) - potential(x, b_old, c_old)
 
 work_step_batch = vmap(work_step, in_axes=(0, None, None, None, None))
 
-# ===== プロトコル定義 =====
+# ===== Protocol Definitions =====
 
 def protocol_create_v1(t):
-    """Create v1（元のバージョン）: 井戸を掘る方式"""
-    b = 2.0 * t       # 障壁を徐々に形成
-    c = 1.0 * t       # 右へ傾ける
+    """Create v1 (original): Dig well method"""
+    b = 2.0 * t       # Gradually form barrier
+    c = 1.0 * t       # Tilt to the right
     return b, c
 
 def protocol_create(t):
-    """Create v2（Gemini提案）: 壁を立てる方式
+    """Create v2 (improved): Raise wall method
     
-    最初から二重井戸があり、壁を高くして閉じ込める
-    これにより「位置エネルギーを下げる」ではなく
-    「自由度を制限する」操作になる
+    Start with double-well, raise wall to confine
+    This restricts degrees of freedom rather than
+    lowering potential energy
     """
-    # Phase 1 (t < 0.3): 傾けて右井戸に誘導
-    # Phase 2 (0.3 <= t < 0.7): 傾きを維持して安定化  
-    # Phase 3 (t >= 0.7): 壁を高くして閉じ込め
+    # Phase 1 (t < 0.3): Tilt to guide to right well
+    # Phase 2 (0.3 <= t < 0.7): Maintain tilt for stabilization
+    # Phase 3 (t >= 0.7): Raise wall to confine
     
-    # 連続関数で表現
-    b = 2.0 + 1.0 * jnp.maximum(0, (t - 0.7) / 0.3)  # 2 → 3 (t > 0.7で増加)
+    # Expressed as continuous functions
+    b = 2.0 + 1.0 * jnp.maximum(0, (t - 0.7) / 0.3)  # 2 → 3 (increases for t > 0.7)
     c = 0.5 * jnp.minimum(1.0, t / 0.3) * jnp.maximum(0, 1 - jnp.maximum(0, (t - 0.7) / 0.3))
     return b, c
 
 def protocol_create_v3(t):
-    """Create v3: より明確な「壁を立てる」方式
+    """Create v3: Clear "raise wall" method
     
-    最初は浅い井戸、徐々に深くする（壁を高くする）
-    位置は変えず、閉じ込めを強くする
+    Start with shallow well, gradually deepen (raise wall)
+    Position unchanged, strengthen confinement
     """
-    # 最初から右側に配置、壁を高くしていく
-    b = 1.0 + 2.0 * t   # 1 → 3 （障壁を高くする）
-    c = 0.3             # 軽い右バイアス（固定）
+    # Start on right side, raise wall
+    b = 1.0 + 2.0 * t   # 1 → 3 (raise barrier)
+    c = 0.3             # Light right bias (fixed)
     return b, c
 
 def protocol_delete(t):
-    """Delete: 確定状態 → 左井戸（状態0）へ消去（ランダウアー）"""
-    b = 2.0 * (1 - t) + 0.1  # 障壁を下げる
-    c = -1.5 * t             # 左へ強く傾ける
+    """Delete: Definite state → left well (state 0) erasure (Landauer)"""
+    b = 2.0 * (1 - t) + 0.1  # Lower barrier
+    c = -1.5 * t             # Strongly tilt left
     return b, c
 
 def protocol_update(t):
-    """Update: 左井戸 → 右井戸（状態変更）"""
+    """Update: Left well → right well (state change)"""
     if t < 0.5:
-        # 前半: 障壁を下げる
+        # First half: Lower barrier
         p = t * 2
         b = 2.0 * (1 - p) + 0.1
         c = 0.0
     else:
-        # 後半: 右へ傾けて障壁を上げる
+        # Second half: Tilt right and raise barrier
         p = (t - 0.5) * 2
         b = 2.0 * p + 0.1
         c = 1.5 * p
     return b, c
 
-# プロトコルをJAX互換の配列に変換
+# Convert protocol to JAX-compatible arrays
 def precompute_protocol(protocol_fn, n_steps):
-    """プロトコルを事前計算（JAXのループ用）"""
+    """Precompute protocol (for JAX loops)"""
     bs = []
     cs = []
     for i in range(n_steps + 1):
@@ -129,30 +132,30 @@ def precompute_protocol(protocol_fn, n_steps):
         cs.append(c)
     return jnp.array(bs), jnp.array(cs)
 
-# ===== シミュレーション実行 =====
+# ===== Simulation Execution =====
 
 def run_simulation(protocol_fn, n_steps, n_particles, T, key, init_x=None):
     """
-    プロトコルを実行し、総仕事を計算
+    Execute protocol and calculate total work
     
     Args:
-        protocol_fn: プロトコル関数
-        n_steps: ステップ数
-        n_particles: 粒子数
-        T: 温度
-        key: 乱数キー
-        init_x: 初期位置（Noneなら原点付近からスタート）
+        protocol_fn: Protocol function
+        n_steps: Number of steps
+        n_particles: Number of particles
+        T: Temperature
+        key: Random key
+        init_x: Initial position (None starts near origin)
     
     Returns:
-        mean_work: 平均仕事
-        std_work: 仕事の標準偏差
-        final_x: 最終位置
-        work_trajectory: 仕事の軌跡
+        mean_work: Mean work
+        std_work: Work standard deviation
+        final_x: Final positions
+        work_trajectory: Work trajectory
     """
-    # プロトコルを事前計算
+    # Precompute protocol
     bs, cs = precompute_protocol(protocol_fn, n_steps)
     
-    # 初期位置
+    # Initial position
     if init_x is None:
         key, subkey = random.split(key)
         x = random.normal(subkey, shape=(n_particles,)) * 0.3
@@ -166,29 +169,29 @@ def run_simulation(protocol_fn, n_steps, n_particles, T, key, init_x=None):
         b_old, c_old = bs[i], cs[i]
         b_new, c_new = bs[i+1], cs[i+1]
         
-        # 仕事を計算（パラメータ変化による）
+        # Calculate work (from parameter change)
         w = work_step_batch(x, b_old, c_old, b_new, c_new)
         total_work = total_work + w
         work_trajectory.append(jnp.mean(total_work))
         
-        # 位置を更新
+        # Update positions
         key, subkey = random.split(key)
         keys = random.split(subkey, n_particles)
         x = step_batch(x, keys, b_new, c_new, T)
     
     return jnp.mean(total_work), jnp.std(total_work), x, jnp.array(work_trajectory)
 
-# ===== Maintain シミュレーション =====
+# ===== Maintain Simulation =====
 
 def run_maintain_simulation(n_steps, n_particles, T, key, target_state=1.0):
     """
-    状態維持のシミュレーション
-    エラー率と補正コストを測定
+    State maintenance simulation
+    Measure error rate and correction cost
     """
-    b = 2.0  # 固定障壁
-    c = 0.0  # バイアスなし
+    b = 2.0  # Fixed barrier
+    c = 0.0  # No bias
     
-    # 初期状態：ターゲット状態に配置
+    # Initial state: Place at target state
     x = jnp.ones(n_particles) * target_state
     
     total_errors = 0
@@ -196,12 +199,12 @@ def run_maintain_simulation(n_steps, n_particles, T, key, target_state=1.0):
     error_history = []
     
     for i in range(n_steps):
-        # 位置を更新
+        # Update positions
         key, subkey = random.split(key)
         keys = random.split(subkey, n_particles)
         x = step_batch(x, keys, b, c, T)
         
-        # エラー検出（ターゲットと反対側に落ちた）
+        # Error detection (fell to opposite side of target)
         if target_state > 0:
             errors = x < 0
         else:
@@ -210,12 +213,12 @@ def run_maintain_simulation(n_steps, n_particles, T, key, target_state=1.0):
         n_errors = jnp.sum(errors)
         total_errors += int(n_errors)
         
-        # エラー補正（強制復帰）
+        # Error correction (forced restoration)
         if n_errors > 0:
-            # 補正の仕事（概算：障壁を超えるエネルギー）
+            # Correction work (estimate: energy to cross barrier)
             correction_work = n_errors * 2.0 * KB * T
             total_correction_work += float(correction_work)
-            # 強制復帰
+            # Forced restoration
             x = jnp.where(errors, target_state, x)
         
         error_history.append(int(n_errors))
@@ -225,21 +228,65 @@ def run_maintain_simulation(n_steps, n_particles, T, key, target_state=1.0):
     
     return error_rate, maintain_cost_per_step, jnp.array(error_history)
 
-# ===== メイン実験 =====
+# ===== CSV Export Functions =====
+
+def export_crud_results_to_csv(results, temp_results, prefix="landauer_crud"):
+    """
+    Export CRUD simulation results to CSV files
+    
+    Args:
+        results: CRUD operation results
+        temp_results: Temperature dependence results
+        prefix: Filename prefix
+    """
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    # Export CRUD summary
+    filename_crud = f"{prefix}_summary_{timestamp}.csv"
+    with open(filename_crud, 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(['Operation', 'Mean_Work', 'Std_Work', 'Ratio_to_Landauer'])
+        landauer = KB * 1.0 * jnp.log(2)  # T=1.0
+        for op in ['Create', 'Delete', 'Update']:
+            if op in results:
+                mean_w, std_w = results[op]
+                ratio = mean_w / landauer
+                writer.writerow([op, mean_w, std_w, ratio])
+        # Maintain separately
+        if 'Maintain' in results:
+            cost, error_rate = results['Maintain']
+            writer.writerow(['Maintain', cost, error_rate, 'N/A'])
+    print(f"Exported: {filename_crud}")
+    
+    # Export temperature dependence
+    filename_temp = f"{prefix}_temperature_{timestamp}.csv"
+    with open(filename_temp, 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(['Temperature', 'Create_Work', 'Delete_Work', 'Landauer_Limit'])
+        for i, (temp, create_w) in enumerate(temp_results['Create']):
+            delete_w = temp_results['Delete'][i][1]
+            landauer_t = KB * temp * jnp.log(2)
+            writer.writerow([temp, create_w, delete_w, float(landauer_t)])
+    print(f"Exported: {filename_temp}")
+    
+    return filename_crud, filename_temp
+
+
+# ===== Main Experiment =====
 
 def main():
     print("=" * 60)
     print("Landauer Extension Simulator")
     print("=" * 60)
     
-    # パラメータ
+    # Parameters
     N_PARTICLES = 10000
     N_STEPS = 2000
     T = 1.0
     
     key = random.PRNGKey(42)
     
-    # ランダウアー限界
+    # Landauer limit
     landauer = KB * T * jnp.log(2)
     print(f"\nLandauer limit: k_B T ln(2) = {landauer:.4f}")
     print(f"Temperature: T = {T}")
@@ -250,31 +297,31 @@ def main():
     results = {}
     trajectories = {}
     
-    # ----- Create (3つのプロトコル比較) -----
+    # ----- Create (compare 3 protocols) -----
     print("Running Create simulations (3 protocols)...")
     
-    # v1: 井戸を掘る方式（元）
+    # v1: Dig well method (original)
     key, subkey = random.split(key)
     mean_w_v1, std_w_v1, final_x_v1, traj_v1 = run_simulation(
         protocol_create_v1, N_STEPS, N_PARTICLES, T, subkey, init_x=0.0
     )
     print(f"  Create v1 (dig well):   <W> = {mean_w_v1:.4f} ± {std_w_v1:.4f}, ratio = {mean_w_v1/landauer:.2f}")
     
-    # v2: 壁を立てる方式（Gemini提案）
+    # v2: Raise wall method (improved)
     key, subkey = random.split(key)
     mean_w_v2, std_w_v2, final_x_v2, traj_v2 = run_simulation(
         protocol_create, N_STEPS, N_PARTICLES, T, subkey, init_x=0.5
     )
     print(f"  Create v2 (raise wall): <W> = {mean_w_v2:.4f} ± {std_w_v2:.4f}, ratio = {mean_w_v2/landauer:.2f}")
     
-    # v3: 壁を高くする方式
+    # v3: Heighten wall method
     key, subkey = random.split(key)
     mean_w_v3, std_w_v3, final_x_v3, traj_v3 = run_simulation(
         protocol_create_v3, N_STEPS, N_PARTICLES, T, subkey, init_x=0.5
     )
     print(f"  Create v3 (heighten):   <W> = {mean_w_v3:.4f} ± {std_w_v3:.4f}, ratio = {mean_w_v3/landauer:.2f}")
     
-    # デフォルトはv2を使用
+    # Use v2 as default
     results['Create'] = (float(mean_w_v2), float(std_w_v2))
     results['Create_v1'] = (float(mean_w_v1), float(std_w_v1))
     results['Create_v3'] = (float(mean_w_v3), float(std_w_v3))
@@ -323,7 +370,7 @@ def main():
     print(f"  Error rate: {error_rate:.6f}")
     print()
     
-    # ----- 温度依存性 -----
+    # ----- Temperature Dependence -----
     print("Running temperature dependence...")
     temperatures = [0.5, 1.0, 1.5, 2.0, 2.5]
     temp_results = {'Create': [], 'Delete': []}
@@ -348,9 +395,17 @@ def main():
         print(f"  {temp:.1f}    {temp_results['Create'][i][1]:.4f}    {temp_results['Delete'][i][1]:.4f}    {landauer_t:.4f}")
     print()
     
-    # ----- 散逸仕事とEngineering Cost -----
+    # ----- Export to CSV -----
     print("=" * 60)
-    print("DISSIPATION ANALYSIS (Gemini's insight)")
+    print("Exporting Results to CSV")
+    print("=" * 60)
+    print()
+    export_crud_results_to_csv(results, temp_results)
+    print()
+    
+    # ----- Dissipation Analysis -----
+    print("=" * 60)
+    print("DISSIPATION ANALYSIS")
     print("=" * 60)
     print()
     print("Thermodynamic Work (W):")
@@ -359,8 +414,8 @@ def main():
     print(f"  Update: {results['Update'][0]:.4f} (net)")
     print()
     
-    # Engineering Cost: 現実のコンピュータでは回収できない
-    # Create の負の仕事はゼロとして扱う
+    # Engineering Cost: Cannot recover in real computers
+    # Negative work from Create treated as zero
     create_eng = max(0, results['Create'][0])
     delete_eng = max(0, results['Delete'][0])
     update_eng = max(0, results['Update'][0])
@@ -371,14 +426,14 @@ def main():
     print(f"  Update: {update_eng:.4f}")
     print()
     
-    # 全移動エネルギー（散逸の指標）
+    # Total energy moved (dissipation indicator)
     total_energy_moved = abs(results['Create'][0]) + abs(results['Delete'][0])
     print("Total Energy Moved (|W_create| + |W_delete|):")
     print(f"  {total_energy_moved:.4f}")
     print(f"  This is the 'hidden cost' - energy that flows but isn't recovered")
     print()
     
-    # Update = Delete + Create の検証
+    # Verify Update = Delete + Create
     predicted_update = results['Delete'][0] + results['Create'][0]
     actual_update = results['Update'][0]
     print("Update = Delete + Create verification:")
@@ -402,7 +457,7 @@ def main():
     print(f"Maintain error rate: {results['Maintain'][1]:.6f}")
     print()
     
-    # ----- 理論予測との比較 -----
+    # ----- Comparison with Predictions -----
     print("=" * 60)
     print("COMPARISON WITH PREDICTIONS")
     print("=" * 60)
@@ -423,12 +478,12 @@ def main():
     print(f"  Status: {'✓ CONFIRMED' if delete_ratio >= 0.8 else '? CHECK'}")
     print()
     
-    # ----- プロット -----
+    # ----- Plotting -----
     print("Generating plots...")
     
     fig, axes = plt.subplots(2, 2, figsize=(12, 10))
     
-    # 1. 仕事の軌跡
+    # 1. Work Trajectories
     ax1 = axes[0, 0]
     for op, traj in trajectories.items():
         ax1.plot(traj, label=op)
@@ -440,7 +495,7 @@ def main():
     ax1.legend()
     ax1.grid(True, alpha=0.3)
     
-    # 2. 温度依存性
+    # 2. Temperature Dependence
     ax2 = axes[0, 1]
     temps = [t[0] for t in temp_results['Create']]
     create_works = [t[1] for t in temp_results['Create']]
@@ -456,7 +511,7 @@ def main():
     ax2.legend()
     ax2.grid(True, alpha=0.3)
     
-    # 3. バーチャート
+    # 3. Bar Chart
     ax3 = axes[1, 0]
     ops = ['Create', 'Delete', 'Update']
     works = [results[op][0] for op in ops]
@@ -473,11 +528,11 @@ def main():
     ax3.legend()
     ax3.grid(True, alpha=0.3, axis='y')
     
-    # 4. ポテンシャル可視化
+    # 4. Potential Visualization
     ax4 = axes[1, 1]
     x_range = jnp.linspace(-2, 2, 200)
     
-    # Create の各段階
+    # Create at various stages
     for t in [0.0, 0.33, 0.66, 1.0]:
         b, c = protocol_create(t)
         V = potential(x_range, b, c)
@@ -491,8 +546,10 @@ def main():
     ax4.grid(True, alpha=0.3)
     
     plt.tight_layout()
-    plt.savefig('landauer_simulation_results.png', dpi=150)
+    plt.savefig('landauer_simulation_results.png', dpi=150, bbox_inches='tight')
+    plt.savefig('landauer_simulation_results.pdf', dpi=300, bbox_inches='tight')
     print("Saved: landauer_simulation_results.png")
+    print("Saved: landauer_simulation_results.pdf")
     plt.close()
     
     print()
