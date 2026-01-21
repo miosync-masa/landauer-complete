@@ -12,7 +12,6 @@ This repository contains simulation code for the paper:
 
 > **Complete Thermodynamics of Information Operations: Beyond Landauer's Erasure Principle**  
 > Masamichi Iizumi (Miosync, Inc.)  
-> Physical Review Letters (submitted)
 
 Landauer's principle (1961) established that erasing one bit costs at least $k_B T \ln 2$. But information systems perform four operations: **Create, Read, Update, Delete (CRUD)**. For 60 years, only Delete had known thermodynamic bounds.
 
@@ -122,16 +121,11 @@ If you use this code, please cite:
   author = {Iizumi, Masamichi},
   title = {Complete Thermodynamics of Information Operations: 
            Beyond Landauer's Erasure Principle},
-  journal = {Physical Review Letters},
+  journal = {},
   year = {2025},
   note = {Submitted}
 }
 ```
-
-## Related Work
-
-- [The Consonance Tensor](https://doi.org/10.5281/zenodo.17920244) — Mathematical framework for music analysis
-- [HELA](https://github.com/miosync-masa/HELA) — Harmonic Energy Landscape Analyzer
 
 ## License
 
